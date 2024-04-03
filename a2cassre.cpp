@@ -17,19 +17,31 @@
 #include <SDL.h>
 #include <cmath>
 #include <string>
+#include <cstring>
 #include <vector>
 #include <fstream>
 #include <iostream>
 
 
 
-static const float MOVEMENT_THRESHOLD = 0.001f;
+static const float MOVEMENT_THRESHOLD = 0.0005f;
+static const int Q = 20;
+// static const bool SLOPE = true;
+static const bool SLOPE = false;
 
 static std::int_fast8_t slope(const float prev, const float curr) {
     if (abs(curr-prev) < MOVEMENT_THRESHOLD) {
         return 0;
     }
     return prev < curr ? +1 : -1;
+}
+
+static double zero(const double t0, const double v0, const double t1, const double v1) {
+    const double m = (v1-v0)/(t1-t0);
+    const double b = v0-m*t0;
+    const double z = -b/m;
+    // std::printf("%18.8f <== %18.8f,%18.8f;%18.8f,%18.8f\n", z, t0, v0, t1, v1);
+    return z;
 }
 
 /*
@@ -299,16 +311,19 @@ int main(int argc, char *argv[]) {
         SDL_Log("Could not open file: %s\n", SDL_GetError());
         return 1;
     }
-    // std::printf("Loaded WAVE file:\n");
-    // std::printf("    buffer size: %d bytes\n", wav_length);
-    // std::printf("    sample rate: %dHz\n", wav_spec.freq);
-    // std::printf("    sample datatype: %04X\n", wav_spec.format);
-    // std::printf("    channels: %d\n", wav_spec.channels);
-    // std::printf("    silence value: %d\n", wav_spec.silence);
-    // std::printf("    sample count: %d\n", wav_spec.samples);
+    std::printf("Loaded WAVE file:\n");
+    std::printf("    buffer size: %d bytes\n", wav_length);
+    std::printf("    sample rate: %dHz\n", wav_spec.freq);
+    std::printf("    sample datatype: %04X\n", wav_spec.format);
+    std::printf("    channels: %d\n", wav_spec.channels);
+    std::printf("    silence value: %d\n", wav_spec.silence);
+    std::printf("    sample count: %d\n", wav_spec.samples);
 
     SDL_AudioCVT cvt;
-    SDL_BuildAudioCVT(&cvt, wav_spec.format, wav_spec.channels, wav_spec.freq, AUDIO_F32, 1, 102048);
+    if (SDL_BuildAudioCVT(&cvt, wav_spec.format, wav_spec.channels, wav_spec.freq, AUDIO_F32, 1, 102048) < 0) {
+        SDL_Log("Unable to convert WAV: %s", SDL_GetError());
+        return 1;
+    }
     cvt.len = wav_length;
     cvt.buf = reinterpret_cast<Uint8*>(std::malloc(cvt.len * cvt.len_mult));
     std::memcpy(cvt.buf, wav_buffer, cvt.len);
@@ -317,27 +332,54 @@ int main(int argc, char *argv[]) {
     // cvt.buf has cvt.len_cvt bytes of converted data now.
     const float *const input = reinterpret_cast<float*>(cvt.buf);
     const std::uint_fast32_t input_siz = cvt.len_cvt/4u;
-//    int m = 0;
-//    for (int i = 0; i < input_siz; ++i) {
-//        std::printf("%f ", input[i]);
-//        if (!(++m % 50)) {
-//            std::printf("\n");
-//        }
-//    }
-
+    if (0) {
+        int m = 0;
+        for (int i = 0; i < input_siz; ++i) {
+            std::printf("%f ", input[i]);
+            if (!(++m % 50)) {
+                std::printf("\n");
+            }
+        }
+    }
 
 
     std::vector<std::uint32_t> cycle;
 
-    std::int_fast8_t slope_was = 0;
-    std::uint_fast32_t i_was = 0;
-    for (std::uint_fast32_t i = 1; i < input_siz-1; ++i) {
-        std::int_fast8_t slope_is = slope(input[i-1], input[i]);
-        const std::uint32_t a = i-i_was;
-        if (slope_is != 0 && slope_is != slope_was && (11u < a)) {
-            cycle.push_back(a);
-            i_was = i;
-            slope_was = slope_is;
+    if (SLOPE) { // slope-change-based algorithm
+        std::int_fast8_t slope_was = 0;
+        std::uint_fast32_t i_was = 0;
+        int q = 0;
+        for (std::uint_fast32_t i = 1; i < input_siz-1; ++i) {
+            std::int_fast8_t slope_is = slope(input[i-1], input[i]);
+            const std::uint32_t a = i-i_was;
+            if (Q < ++q && slope_is != 0 && slope_is != slope_was && (11u < a)) {
+                q = 0;
+                cycle.push_back(a);
+                i_was = i;
+                slope_was = slope_is;
+            }
+        }
+    } else { // zero-crossing-based algorithm
+        const double E = 0.0;
+        const double M = (1.0E5/102048.0);
+        double t = 0.0;
+        for (std::uint_fast32_t i = 1; i < input_siz; ++i) {
+            if ((input[i-1] < E && E < input[i]) || (input[i] < E && E < input[i-1])) {
+                double p = t;
+                t = zero((i-1)*M, input[i-1], i*M, input[i]);
+                cycle.push_back(std::round(t-p));
+            }
+        }
+    }
+
+    if (0) {
+        int m = 0;
+        for (std::uint_fast32_t i = 0; i < cycle.size(); ++i) {
+            std::uint32_t x = cycle[i];
+            std::printf("%d ", x);
+            if (!(++m % 64)) {
+                std::printf("\n");
+            }
         }
     }
 
@@ -364,14 +406,101 @@ int main(int argc, char *argv[]) {
     std::vector<std::uint32_t> cycle4 = analyze_fsm(cycle3);
 
     // dump:
-//    int m = 0;
-//    for (std::uint_fast32_t i = 0; i < cycle4.size(); ++i) {
-//        std::printf("%d ", cycle4[i]);
-//        if (!(++m % 50)) {
-//            std::printf("\n");
-//        }
-//    }
-//    std::printf("\n");
+    if (0)
+    {
+        int cm = 64;
+        int im = 0;
+        for (std::uint_fast32_t i = 0; i < cycle4.size(); ++i) {
+            if (cycle4[i] == 65) {
+                std::printf("\n");
+                im = 0;
+                cm = 3;
+            }
+            std::printf("%d ", cycle4[i]);
+            if (cm <= ++im) {
+                std::printf("\n");
+                cm = 64;
+                im = 0;
+            }
+        }
+        std::printf("\n");
+    }
+
+    // dump hex:
+    if (1)
+    {
+        int NUDGE = 0;
+
+        enum {START, SKIP, CAPTURE};
+
+        int state = START;
+        if (NUDGE) {
+            state = CAPTURE;
+        }
+        int skip = 0;
+        int c = cycle4.size();
+        if (NUDGE) {
+            c = 72+4*64*8*2;
+        }
+        int i = 0;
+        if (NUDGE) {
+            i = 72;
+        }
+        int cap = 0;
+        int xbyt = 0;
+        int chc = 0;
+        while (i < c) {
+            int xbit = cycle4[NUDGE*2+i++];
+            switch (state) {
+                case START: {
+                    if (xbit == 65) {
+                        skip = 2;
+                        state = SKIP;
+                    }
+                }
+                break;
+                case SKIP: {
+                    if (--skip <= 0) {
+                        std::printf("\n[SKIP HEADER]\n");
+                        state = CAPTURE;
+                        cap = 0;
+                        chc = 0;
+                    }
+                }
+                break;
+                case CAPTURE: {
+                    if (xbit == 65) {
+                        skip = 2;
+                        state = SKIP;
+                    } else {
+                        if (cycle4[NUDGE*2+i] == xbit) {
+                            ++i; // skip identical half cycle
+                        } else {
+                            printf("\nHALF CYCLE MISMATCH\n");
+                        }
+                        xbyt <<= 1;
+                        if (xbit == 50) {
+                            xbyt |= 1;
+                        }
+                        ++cap;
+                        if (8 <= cap) {
+                            cap = 0;
+                            std::printf("%02x ", xbyt);
+                            xbyt = 0;
+                            if (64 <= ++chc) {
+                                std::printf("\n");
+                                chc = 0;
+                            }
+                        }
+                    }
+                }
+                break;
+                default: {
+
+                }
+            }
+        }
+    }
 
     out_wave(cycle4, argv[2]);
 
